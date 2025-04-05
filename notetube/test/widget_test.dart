@@ -18,7 +18,6 @@ void main() {
     // Verify that the app title is displayed
     expect(find.text('NoteTube - Video to Notes'), findsOneWidget);
 
-    // Verify that the initial UI elements are present
     expect(find.text('Upload Audio File'), findsOneWidget);
     expect(find.text('Paste YouTube video link'), findsOneWidget);
     expect(find.text('Transcribe from YouTube'), findsOneWidget);
