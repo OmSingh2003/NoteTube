@@ -1,122 +1,387 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:cross_file/cross_file.dart';
+import 'services/whisper_service.dart';
+import 'utils/pdf_generator.dart';
+import 'package:path/path.dart' as path;
 
-void main() {
-  runApp(const MyApp());
+Future<void> main() async {
+  // Ensure Flutter is initialized before running the app
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  try {
+    debugPrint("Loading .env file...");
+    await dotenv.load();
+    debugPrint(".env file loaded successfully");
+    debugPrint("API Key present: ${dotenv.env['LEMONFOX_API_KEY'] != null}");
+    
+    debugPrint("Initializing WhisperService...");
+    await WhisperService.initialize();
+    debugPrint("WhisperService initialized successfully");
+  } catch (e, stackTrace) {
+    debugPrint("Error during initialization: $e");
+    debugPrint("Stack trace: $stackTrace");
+  }
+  
+  runApp(const NoteTubeApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class NoteTubeApp extends StatelessWidget {
+  const NoteTubeApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      debugShowCheckedModeBanner: false,
+      title: 'NoteTube',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        primarySwatch: Colors.deepPurple,
+        scaffoldBackgroundColor: Colors.white,
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const TranscriptionScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class TranscriptionScreen extends StatefulWidget {
+  const TranscriptionScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<TranscriptionScreen> createState() => _TranscriptionScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _TranscriptionScreenState extends State<TranscriptionScreen> {
+  String? _transcription;
+  final TextEditingController _linkController = TextEditingController();
+  bool _isLoading = false;
+  String? _errorMessage;
+  List<File> _savedPDFs = [];
 
-  void _incrementCounter() {
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedPDFs();
+  }
+
+  Future<void> _loadSavedPDFs() async {
+    final pdfs = await PDFGenerator.getAllPDFs();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _savedPDFs = pdfs;
     });
   }
 
-  @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+  Future<void> _pickAndTranscribeAudio() async {
+    try {
+      // Configure file picker to open file manager
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['mp3', 'wav', 'm4a', 'aac', 'wma'],
+        allowMultiple: false,
+        withData: true,
+        dialogTitle: 'Select Audio File',
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        setState(() {
+          _isLoading = true;
+          _errorMessage = null;
+        });
+
+        final file = File(result.files.first.path!);
+        final text = await WhisperService.transcribeAudio(file);
+        
+        if (!mounted) return;
+
+        setState(() {
+          _transcription = text;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.toString();
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _transcribeFromYouTubeLink() async {
+    final link = _linkController.text.trim();
+    if (link.isEmpty) {
+      setState(() {
+        _errorMessage = 'Please enter a YouTube link';
+      });
+      return;
+    }
+
+    try {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+      
+      final text = await WhisperService.transcribeFromURL(link);
+      
+      if (!mounted) return;
+
+      setState(() {
+        _transcription = text;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.toString();
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _downloadPdf() async {
+    if (_transcription == null) return;
+
+    try {
+      final title = _linkController.text.isNotEmpty
+          ? 'YouTube_Transcription'
+          : 'Audio_Transcription';
+          
+      final pdfFile = await PDFGenerator.generatePdf(_transcription!, title: title);
+      
+      if (!mounted) return;
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("PDF saved: ${path.basename(pdfFile.path)}"),
+          action: SnackBarAction(
+            label: 'View',
+            onPressed: () => _showPDFOptions(pdfFile),
+          ),
+        ),
+      );
+      
+      _loadSavedPDFs(); // Refresh the list
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error generating PDF: $e")),
+      );
+    }
+  }
+
+  Future<void> _showPDFOptions(File file) async {
+    if (!mounted) return;
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.share),
+              title: const Text('Share PDF'),
+              onTap: () {
+                Navigator.pop(context);
+                Share.shareXFiles([XFile(file.path)]);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete),
+              title: const Text('Delete PDF'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _deletePDF(file);
+              },
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+    );
+  }
+
+  Future<void> _deletePDF(File file) async {
+    try {
+      await PDFGenerator.deletePDF(file);
+      _loadSavedPDFs(); // Refresh the list
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Deleted: ${path.basename(file.path)}")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error deleting PDF: $e")),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _linkController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("NoteTube - Video to Notes"),
+        elevation: 2,
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _pickAndTranscribeAudio,
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text("Select Audio File"),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.all(16),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    TextField(
+                      controller: _linkController,
+                      decoration: const InputDecoration(
+                        labelText: "Paste YouTube video link",
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.link),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    ElevatedButton.icon(
+                      onPressed: _transcribeFromYouTubeLink,
+                      icon: const Icon(Icons.youtube_searched_for),
+                      label: const Text("Transcribe from YouTube"),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.all(16),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    if (_errorMessage != null)
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.red[100],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          _errorMessage!,
+                          style: TextStyle(color: Colors.red[900]),
+                        ),
+                      ),
+                    if (_isLoading)
+                      const Expanded(
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircularProgressIndicator(),
+                              SizedBox(height: 16),
+                              Text("Transcribing..."),
+                            ],
+                          ),
+                        ),
+                      )
+                    else if (_transcription != null)
+                      Expanded(
+                        child: Column(
+                          children: [
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.grey.shade300),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: SingleChildScrollView(
+                                  child: Text(_transcription!),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            ElevatedButton.icon(
+                              onPressed: _downloadPdf,
+                              icon: const Icon(Icons.picture_as_pdf),
+                              label: const Text("Save as PDF"),
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.all(16),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else if (_savedPDFs.isNotEmpty)
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 8.0),
+                              child: Text(
+                                "Saved Transcriptions",
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: ListView.builder(
+                                itemCount: _savedPDFs.length,
+                                itemBuilder: (context, index) {
+                                  final file = _savedPDFs[index];
+                                  final fileName = path.basename(file.path);
+                                  return ListTile(
+                                    leading: const Icon(Icons.picture_as_pdf),
+                                    title: Text(fileName),
+                                    subtitle: Text(
+                                      'Created: ${file.lastModifiedSync().toString().split('.')[0]}',
+                                    ),
+                                    trailing: IconButton(
+                                      icon: const Icon(Icons.more_vert),
+                                      onPressed: () => _showPDFOptions(file),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      const Expanded(
+                        child: Center(
+                          child: Text(
+                            "No transcriptions yet.\nSelect an audio file or paste a YouTube link to start.",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
