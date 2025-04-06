@@ -1,23 +1,22 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:cross_file/cross_file.dart';
 import 'services/whisper_service.dart';
 import 'utils/pdf_generator.dart';
 import 'package:path/path.dart' as path;
+import 'screens/study_tools_screen.dart';
 
 Future<void> main() async {
-  // Ensure Flutter is initialized before running the app
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   try {
     debugPrint("Loading .env file...");
     await dotenv.load();
     debugPrint(".env file loaded successfully");
     debugPrint("API Key present: ${dotenv.env['LEMONFOX_API_KEY'] != null}");
-    
+
     debugPrint("Initializing WhisperService...");
     await WhisperService.initialize();
     debugPrint("WhisperService initialized successfully");
@@ -25,23 +24,37 @@ Future<void> main() async {
     debugPrint("Error during initialization: $e");
     debugPrint("Stack trace: $stackTrace");
   }
-  
+
   runApp(const NoteTubeApp());
 }
 
 class NoteTubeApp extends StatelessWidget {
   const NoteTubeApp({super.key});
 
+  ThemeData _getDarkTheme() {
+    return ThemeData(
+      primarySwatch: Colors.teal,
+      scaffoldBackgroundColor: Colors.grey[900],
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      cardTheme: CardTheme(
+        elevation: 4,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+      ),
+      appBarTheme: AppBarTheme(
+        backgroundColor: Colors.grey[850],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'NoteTube',
-      theme: ThemeData(
-        primarySwatch: Colors.deepPurple,
-        scaffoldBackgroundColor: Colors.white,
-        useMaterial3: true,
-      ),
+      theme: _getDarkTheme(),
       home: const TranscriptionScreen(),
     );
   }
@@ -67,47 +80,17 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _loadSavedPDFs();
   }
 
+  @override
+  void dispose() {
+    _linkController.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadSavedPDFs() async {
     final pdfs = await PDFGenerator.getAllPDFs();
     setState(() {
       _savedPDFs = pdfs;
     });
-  }
-
-  Future<void> _pickAndTranscribeAudio() async {
-    try {
-      // Configure file picker to open file manager
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['mp3', 'wav', 'm4a', 'aac', 'wma'],
-        allowMultiple: false,
-        withData: true,
-        dialogTitle: 'Select Audio File',
-      );
-
-      if (result != null && result.files.isNotEmpty) {
-        setState(() {
-          _isLoading = true;
-          _errorMessage = null;
-        });
-
-        final file = File(result.files.first.path!);
-        final text = await WhisperService.transcribeAudio(file);
-        
-        if (!mounted) return;
-
-        setState(() {
-          _transcription = text;
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _errorMessage = e.toString();
-        _isLoading = false;
-      });
-    }
   }
 
   Future<void> _transcribeFromYouTubeLink() async {
@@ -124,9 +107,9 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _isLoading = true;
         _errorMessage = null;
       });
-      
+
       final text = await WhisperService.transcribeFromURL(link);
-      
+
       if (!mounted) return;
 
       setState(() {
@@ -149,11 +132,14 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       final title = _linkController.text.isNotEmpty
           ? 'YouTube_Transcription'
           : 'Audio_Transcription';
-          
-      final pdfFile = await PDFGenerator.generatePdf(_transcription!, title: title);
-      
+
+      final pdfFile = await PDFGenerator.generatePdf(
+        _transcription!,
+        title: title,
+      );
+
       if (!mounted) return;
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text("PDF saved: ${path.basename(pdfFile.path)}"),
@@ -163,25 +149,40 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           ),
         ),
       );
-      
-      _loadSavedPDFs(); // Refresh the list
+
+      _loadSavedPDFs();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error generating PDF: $e")),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("Error generating PDF: $e")));
     }
   }
 
   Future<void> _showPDFOptions(File file) async {
     if (!mounted) return;
-    
+
     showModalBottomSheet(
       context: context,
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            ListTile(
+              leading: const Icon(Icons.text_snippet),
+              title: const Text('Open in Study Tools'),
+              onTap: () {
+                Navigator.pop(context);
+                _openStudyTools(file);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text('Rename PDF'),
+              onTap: () {
+                Navigator.pop(context);
+                _showRenameDialog(file);
+              },
+            ),
             ListTile(
               leading: const Icon(Icons.share),
               title: const Text('Share PDF'),
@@ -204,182 +205,340 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     );
   }
 
+  Future<void> _showRenameDialog(File file) async {
+    final TextEditingController nameController = TextEditingController();
+    final String currentName = path.basenameWithoutExtension(file.path);
+    nameController.text = currentName;
+
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename PDF'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(
+            labelText: 'New name',
+            hintText: 'Enter new name for the PDF',
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final newName = nameController.text.trim();
+              if (newName.isEmpty || newName == currentName) {
+                Navigator.pop(context);
+                return;
+              }
+
+              try {
+                final directory = file.parent;
+                final newPath = path.join(directory.path, '$newName.pdf');
+                await file.rename(newPath);
+
+                if (!mounted) return;
+                Navigator.pop(context);
+
+                _loadSavedPDFs();
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Renamed to $newName.pdf')),
+                );
+              } catch (e) {
+                if (!mounted) return;
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Error renaming file: $e')),
+                );
+              }
+            },
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openStudyTools(File file) async {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => StudyToolsScreen(pdfFile: file)),
+    );
+  }
+
   Future<void> _deletePDF(File file) async {
     try {
       await PDFGenerator.deletePDF(file);
-      _loadSavedPDFs(); // Refresh the list
-      
+      _loadSavedPDFs();
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Deleted: ${path.basename(file.path)}")),
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error deleting PDF: $e")),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("Error deleting PDF: $e")));
     }
-  }
-
-  @override
-  void dispose() {
-    _linkController.dispose();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("NoteTube - Video to Notes"),
-        elevation: 2,
-      ),
-      body: SafeArea(
-        child: Column(
+        title: Row(
           children: [
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _pickAndTranscribeAudio,
-                      icon: const Icon(Icons.folder_open),
-                      label: const Text("Select Audio File"),
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.all(16),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    TextField(
-                      controller: _linkController,
-                      decoration: const InputDecoration(
-                        labelText: "Paste YouTube video link",
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.link),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    ElevatedButton.icon(
-                      onPressed: _transcribeFromYouTubeLink,
-                      icon: const Icon(Icons.youtube_searched_for),
-                      label: const Text("Transcribe from YouTube"),
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.all(16),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    if (_errorMessage != null)
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        margin: const EdgeInsets.only(bottom: 16),
-                        decoration: BoxDecoration(
-                          color: Colors.red[100],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          _errorMessage!,
-                          style: TextStyle(color: Colors.red[900]),
-                        ),
-                      ),
-                    if (_isLoading)
-                      const Expanded(
-                        child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              CircularProgressIndicator(),
-                              SizedBox(height: 16),
-                              Text("Transcribing..."),
-                            ],
-                          ),
-                        ),
-                      )
-                    else if (_transcription != null)
-                      Expanded(
-                        child: Column(
-                          children: [
-                            Expanded(
-                              child: Container(
-                                padding: const EdgeInsets.all(16),
-                                decoration: BoxDecoration(
-                                  border: Border.all(color: Colors.grey.shade300),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: SingleChildScrollView(
-                                  child: Text(_transcription!),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            ElevatedButton.icon(
-                              onPressed: _downloadPdf,
-                              icon: const Icon(Icons.picture_as_pdf),
-                              label: const Text("Save as PDF"),
-                              style: ElevatedButton.styleFrom(
-                                padding: const EdgeInsets.all(16),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    else if (_savedPDFs.isNotEmpty)
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 8.0),
-                              child: Text(
-                                "Saved Transcriptions",
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: ListView.builder(
-                                itemCount: _savedPDFs.length,
-                                itemBuilder: (context, index) {
-                                  final file = _savedPDFs[index];
-                                  final fileName = path.basename(file.path);
-                                  return ListTile(
-                                    leading: const Icon(Icons.picture_as_pdf),
-                                    title: Text(fileName),
-                                    subtitle: Text(
-                                      'Created: ${file.lastModifiedSync().toString().split('.')[0]}',
-                                    ),
-                                    trailing: IconButton(
-                                      icon: const Icon(Icons.more_vert),
-                                      onPressed: () => _showPDFOptions(file),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    else
-                      const Expanded(
-                        child: Center(
-                          child: Text(
-                            "No transcriptions yet.\nSelect an audio file or paste a YouTube link to start.",
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 16,
-                              color: Colors.grey,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
+            const Icon(
+              Icons.note_alt_outlined,
+              size: 32,
+              color: Colors.white,
+            ),
+            const SizedBox(width: 12),
+            const Text(
+              'NoteTube',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 24,
+                color: Colors.white,
               ),
             ),
           ],
+        ),
+        elevation: 0,
+        backgroundColor: Theme.of(context).primaryColor,
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[850],
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'YouTube Transcription',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      TextField(
+                        controller: _linkController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: 'Paste YouTube video link',
+                          hintStyle: TextStyle(color: Colors.grey[400]),
+                          prefixIcon: Icon(Icons.link, color: Colors.grey[400]),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.grey[700]!),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed:
+                              _isLoading ? null : _transcribeFromYouTubeLink,
+                          icon: _isLoading
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                        Colors.white),
+                                  ),
+                                )
+                              : const Icon(Icons.search),
+                          label: Text(_isLoading
+                              ? 'Transcribing...'
+                              : 'Transcribe from YouTube'),
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.all(16),
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (_errorMessage != null)
+                  Container(
+                    margin: const EdgeInsets.only(top: 16),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.red[900]!.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Text(
+                        _errorMessage!,
+                        style: TextStyle(
+                          color: Colors.red[200],
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (_transcription != null)
+                  Container(
+                    margin: const EdgeInsets.only(top: 16),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[850],
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text(
+                              'Transcription',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            ElevatedButton.icon(
+                              onPressed: _downloadPdf,
+                              icon: const Icon(Icons.download),
+                              label: const Text('Save as PDF'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.teal,
+                                foregroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _transcription!,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (_savedPDFs.isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(top: 16),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[850],
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.3),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.folder_outlined,
+                              color: Colors.teal,
+                              size: 24,
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              'Saved Transcriptions',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        ListView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: _savedPDFs.length,
+                          itemBuilder: (context, index) {
+                            final file = _savedPDFs[index];
+                            final fileName = path.basename(file.path);
+                            return Card(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              color: Colors.grey[800],
+                              child: ListTile(
+                                leading: CircleAvatar(
+                                  backgroundColor: Colors.teal.withOpacity(0.2),
+                                  child: const Icon(
+                                    Icons.picture_as_pdf,
+                                    color: Colors.teal,
+                                  ),
+                                ),
+                                title: Text(
+                                  fileName,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                subtitle: Text(
+                                  'Created: ${file.lastModifiedSync().toString().split('.')[0]}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey[400],
+                                  ),
+                                ),
+                                trailing: IconButton(
+                                  icon: Icon(Icons.more_vert,
+                                      color: Colors.grey[400]),
+                                  onPressed: () => _showPDFOptions(file),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );
